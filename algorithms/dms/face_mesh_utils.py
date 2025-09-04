@@ -38,6 +38,21 @@ def mouth_aspect_ratio(landmarks: np.ndarray) -> float:
     return float(_euclidean(t, b) / horiz)
 
 
+def eye_aperture_points(landmarks: np.ndarray) -> list[list[float]]:
+    """Return four keypoints for blink computation in pixel coords:
+    [left_top, left_bottom, right_top, right_bottom]. Each is [x,y].
+    Uses the average of two top and two bottom eyelid points per eye for stability.
+    """
+    lt = landmarks[LEFT_EYE[1:3]].mean(axis=0)
+    lb = landmarks[LEFT_EYE[4:6]].mean(axis=0)
+    rt = landmarks[RIGHT_EYE[1:3]].mean(axis=0)
+    rb = landmarks[RIGHT_EYE[4:6]].mean(axis=0)
+    return [[float(lt[0]), float(lt[1])],
+            [float(lb[0]), float(lb[1])],
+            [float(rt[0]), float(rt[1])],
+            [float(rb[0]), float(rb[1])]]
+
+
 def extract_landmarks(mp_results, image_width: int, image_height: int) -> np.ndarray | None:
     """Return Nx2 array of pixel coords for the first face landmarks, or None."""
     if not getattr(mp_results, 'multi_face_landmarks', None):

@@ -13,7 +13,7 @@ from collections import deque
 from algorithms.dms.drowsiness import DrowsinessEstimator
 from algorithms.dms.yawn import YawnEstimator
 from algorithms.dms.head_gaze import head_pose_from_box, gaze_zone_from_head, head_pose_from_landmarks
-from algorithms.dms.face_mesh_utils import extract_landmarks, extract_all_landmarks
+from algorithms.dms.face_mesh_utils import extract_landmarks, extract_all_landmarks, eye_aperture_points
 from algorithms.oms.occupants import occupant_metrics_from_faces
 from algorithms.dms.distraction import DistractionEstimator
 from algorithms.scoring.ncap_scoring import NCAPScorer
@@ -256,11 +256,14 @@ async def infer(request: Request):
                 if not kp_px:
                     kp_px = subsample(lm.tolist(), target=24)
                 kp_box = boxnorm_points(kp_px, box, w, h)
-                entry = {"index": i, **pose, "keypoints_box": kp_box}
+                # Eye keypoints for blink/microsleep (four points)
+                eye_px = eye_aperture_points(lm)
+                eye_box = boxnorm_points(eye_px, box, w, h)
+                entry = {"index": i, **pose, "keypoints_box": kp_box, "eye_points_box": eye_box}
             else:
                 pose = head_pose_from_box(box)
                 pose["look_dir"] = "Straight" if abs(pose["yaw_deg"]) < 10 and abs(pose["pitch_deg"]) < 10 else ("Right" if pose["yaw_deg"] > 0 else "Left")
-                entry = {"index": i, **pose, "keypoints_box": []}
+                entry = {"index": i, **pose, "keypoints_box": [], "eye_points_box": []}
             persons.append(entry)
         payload["persons"] = persons
         # NCAP scoring

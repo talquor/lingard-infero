@@ -12,6 +12,7 @@ from algorithms.dms.distraction import DistractionEstimator
 from algorithms.scoring.ncap_scoring import NCAPScorer, NCAPConfig
 from pathlib import Path
 from algorithms.utils.geometry import boxnorm_points, subsample, select_semantic_points
+from algorithms.dms.face_mesh_utils import eye_aperture_points
 
 
 def make_landmarks(points: dict[int, tuple[float, float]], size: int = 468) -> np.ndarray:
@@ -198,6 +199,19 @@ class TestGeometry(unittest.TestCase):
         self.assertLessEqual(len(sub), 24)
         nb = boxnorm_points(sub, box, w, h)
         self.assertTrue(all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for x, y in nb))
+
+    def test_eye_points_four(self):
+        # Synthetic landmarks with known eye indices
+        pts = {
+            33:(100,100),133:(120,100),160:(110,95),158:(112,95),153:(110,105),144:(112,105),
+            263:(140,100),362:(120,100),387:(130,95),385:(128,95),380:(130,105),373:(128,105),
+        }
+        lm = make_landmarks(pts)
+        eyes = eye_aperture_points(lm)
+        self.assertEqual(len(eyes), 4)
+        # top y should be less than bottom y in pixel coords
+        self.assertLess(eyes[0][1], eyes[1][1])  # left eye top < bottom
+        self.assertLess(eyes[2][1], eyes[3][1])  # right eye top < bottom
 
     def test_ncap_load_config(self):
         # Ensure loader merges/overrides defaults
