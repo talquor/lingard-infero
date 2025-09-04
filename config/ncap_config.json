@@ -1,0 +1,13 @@
+{
+  "perclos_max_ok": 15.0,
+  "microsleep_zero_required": true,
+  "eyes_off_road_pct_max": 20.0,
+  "eyes_off_events_per_min_max": 1.0,
+  "yawn_rate_per_min_max": 2.0,
+  "blink_rate_min_ok": 6.0,
+  "blink_rate_max_ok": 30.0,
+
+  "w_vigilance": 0.5,
+  "w_distraction": 0.4,
+  "w_impairment": 0.1
+}

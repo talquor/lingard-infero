@@ -6,14 +6,23 @@ import io, time
 from PIL import Image
 import numpy as np
 import mediapipe as mp
+import threading
 from collections import deque
 
 # KPI algorithms
 from algorithms.dms.drowsiness import DrowsinessEstimator
 from algorithms.dms.yawn import YawnEstimator
-from algorithms.dms.head_gaze import head_pose_from_box, gaze_zone_from_head
-from algorithms.dms.face_mesh_utils import extract_landmarks
+from algorithms.dms.head_gaze import head_pose_from_box, gaze_zone_from_head, head_pose_from_landmarks
+from algorithms.dms.face_mesh_utils import extract_landmarks, extract_all_landmarks
 from algorithms.oms.occupants import occupant_metrics_from_faces
+from algorithms.dms.distraction import DistractionEstimator
+from algorithms.scoring.ncap_scoring import NCAPScorer
+from algorithms.oms.phone import PhoneUseEstimator
+from algorithms.oms.seatbelt import SeatbeltEstimator
+from algorithms.oms.child_presence import ChildPresenceEstimator
+from algorithms.oms.smoking import SmokingEstimator
+from algorithms.oms.hands_on_wheel import HandsOnWheelEstimator
+from algorithms.dms.occlusion import OcclusionEstimator
 
 # ---------- State ----------
 class State:
@@ -40,11 +49,20 @@ app.add_middleware(
 mp_fd = mp.solutions.face_detection
 mp_fm = mp.solutions.face_mesh
 detector = mp_fd.FaceDetection(model_selection=0, min_detection_confidence=0.5)
-face_mesh = mp_fm.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5)
+face_mesh = mp_fm.FaceMesh(static_image_mode=True, max_num_faces=5, refine_landmarks=True, min_detection_confidence=0.5)
+mp_lock = threading.Lock()
 
 # KPI estimators (stateful)
 drowsy = DrowsinessEstimator()
 yawn = YawnEstimator()
+distraction = DistractionEstimator()
+ncap = NCAPScorer(config_path="config/ncap_config.json")
+phone = PhoneUseEstimator()
+seatbelt = SeatbeltEstimator()
+child = ChildPresenceEstimator()
+smoking = SmokingEstimator()
+hands = HandsOnWheelEstimator()
+occlusion = OcclusionEstimator()
 
 def np_from_jpeg(data: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(data)).convert("RGB")
@@ -108,11 +126,14 @@ small {{ color:#9fb0c3; }}
     <div class="kpi"><h3>Yawn</h3><div class="big">{('Yes' if k.get('dms_yawning') else 'No') if k else '-'}</div><div class="sub">sustained mouth open</div></div>
     <div class="kpi"><h3>Gaze</h3><div class="big">{k.get('dms_gaze_zone','-')}</div><div class="sub">on-road {k.get('dms_gaze_on_road_pct','-')}%</div></div>
     <div class="kpi"><h3>Head Yaw</h3><div class="big">{k.get('dms_head_yaw_deg','-')}°</div><div class="sub">pitch {k.get('dms_head_pitch_deg','-')}°</div></div>
+    <div class="kpi"><h3>Eyes Off-Road</h3><div class="big">{k.get('dms_eyes_off_road_pct','-')}%</div><div class="sub">events {k.get('dms_eyes_off_road_events_per_min','-')}/min</div></div>
+    <div class="kpi"><h3>Blink Stats</h3><div class="big">{k.get('dms_avg_blink_dur_ms','-')} ms</div><div class="sub">last {k.get('dms_time_since_last_blink_s','-')} s</div></div>
+    <div class="kpi"><h3>Look Dir</h3><div class="big">{k.get('dms_look_direction','-')}</div><div class="sub">yaw {k.get('dms_head_yaw_deg','-')}°, pitch {k.get('dms_head_pitch_deg','-')}°</div></div>
   </div>
 
   <div class="row" aria-label="OMS KPIs" style="margin-top:12px;">
     <div class="kpi"><h3>Occupants</h3><div class="big">{k.get('oms_occupant_count','-')}</div><div class="sub">cabin occupied: {k.get('oms_cabin_occupied','-')}</div></div>
-    <div class="kpi"><h3>NCAP Score</h3><div class="big">{k.get('ncap_score_overall','-')}</div><div class="sub">heuristic</div></div>
+    <div class="kpi"><h3>NCAP</h3><div class="big">{k.get('ncap_overall','-')}</div><div class="sub">mode: {k.get('ncap_mode','-')}</div></div>
   </div>
 
 </div>
@@ -129,7 +150,9 @@ async def infer(request: Request):
         frame = np_from_jpeg(data)  # HxWx3 RGB uint8
 
         # Face detection (multi)
-        results = detector.process(frame)
+        # MediaPipe detectors are not thread-safe; lock around calls
+        with mp_lock:
+            results = detector.process(frame)
         ann_boxes = []
         face_conf = 0.0
         if results.detections:
@@ -140,19 +163,31 @@ async def infer(request: Request):
 
         # Face landmarks for DMS KPIs
         h, w, _ = frame.shape
-        lm_res = face_mesh.process(frame)
-        landmarks = extract_landmarks(lm_res, w, h) if ann_boxes else None
+        if ann_boxes:
+            with mp_lock:
+                lm_res = face_mesh.process(frame)
+            landmarks = extract_landmarks(lm_res, w, h)
+            all_landmarks = extract_all_landmarks(lm_res, w, h)
+        else:
+            landmarks = None
+            all_landmarks = []
 
         ts = time.time()
         drowsy_out = drowsy.update(ts, landmarks)
         yawn_out = yawn.update(ts, landmarks)
 
-        # Head pose and gaze
-        if ann_boxes:
+        # Head pose and gaze (prefer landmarks when available)
+        if landmarks is not None:
+            hp = head_pose_from_landmarks(landmarks)
+        elif ann_boxes:
             hp = head_pose_from_box(ann_boxes[0])
+            hp["look_dir"] = "Straight" if abs(hp["yaw_deg"]) < 10 and abs(hp["pitch_deg"]) < 10 else ("Right" if hp["yaw_deg"] > 0 else "Left")
         else:
-            hp = {"yaw_deg": 0.0, "pitch_deg": 0.0, "roll_deg": 0.0}
-        gz = gaze_zone_from_head(hp["yaw_deg"], hp["pitch_deg"]) if ann_boxes else {"gaze_zone": "Unknown", "gaze_on_road_pct": 0.0}
+            hp = {"yaw_deg": 0.0, "pitch_deg": 0.0, "roll_deg": 0.0, "look_dir": "Unknown"}
+        gz = gaze_zone_from_head(hp["yaw_deg"], hp["pitch_deg"]) if ann_boxes else {"gaze_zone": "Unknown", "gaze_on_road_pct": None}
+
+        # Distraction KPIs from on-road estimate
+        dis_out = distraction.update(ts, gz["gaze_on_road_pct"]) if gz["gaze_on_road_pct"] is not None else distraction.update(ts, None)
 
         # Update status
         S.last_ok_ts = time.time()
@@ -163,6 +198,13 @@ async def infer(request: Request):
 
         # OMS metrics
         oms = occupant_metrics_from_faces(ann_boxes)
+        # Placeholder additional KPIs (unknown by default)
+        phone_out = phone.update(ts, frame)
+        seatbelt_out = seatbelt.update(ts, frame)
+        child_out = child.update(ts, frame)
+        smoking_out = smoking.update(ts, frame)
+        hands_out = hands.update(ts, frame)
+        occlusion_out = occlusion.update(ts, landmarks)
 
         # Aggregate payload
         payload = {
@@ -173,17 +215,44 @@ async def infer(request: Request):
             "dms_head_yaw_deg": round(hp["yaw_deg"], 1),
             "dms_head_pitch_deg": round(hp["pitch_deg"], 1),
             "dms_head_roll_deg": round(hp["roll_deg"], 1),
+            "dms_look_direction": hp.get("look_dir", "Unknown"),
             "dms_perclos_pct": drowsy_out["perclos_pct"],
             "dms_blinks_per_min": drowsy_out["blinks_per_min"],
+            "dms_avg_blink_dur_ms": drowsy_out["avg_blink_dur_ms"],
+            "dms_time_since_last_blink_s": drowsy_out["time_since_last_blink_s"],
             "dms_microsleep": drowsy_out["microsleep"],
             "dms_drowsiness_score": drowsy_out["drowsiness_score"],
             "dms_yawning": yawn_out["yawning"],
+            "dms_yawns_per_min": yawn_out["yawns_per_min"],
+            # Distraction
+            "dms_eyes_off_road_pct": dis_out["eyes_off_road_pct"],
+            "dms_eyes_off_road_events_per_min": dis_out["eyes_off_road_events_per_min"],
+            "dms_eyes_off_road_dwell_s": dis_out["eyes_off_road_dwell_s"],
+            "dms_eyes_off_road_event_active": dis_out["eyes_off_road_event_active"],
             # OMS
             "oms_occupant_count": oms["occupant_count"],
             "oms_cabin_occupied": oms["cabin_occupied"],
-            # Heuristic NCAP score placeholder
-            "ncap_score_overall": 88 if ann_boxes else 60,
+            "oms_phone_use": phone_out["phone_use"],
+            "oms_seatbelt_fastened": seatbelt_out["seatbelt_fastened"],
+            "oms_child_present": child_out["child_present"],
+            "oms_smoking": smoking_out["smoking"],
+            "oms_hands_on_wheel": hands_out["hands_on_wheel"],
+            # DMS occlusion
+            "dms_face_occluded": occlusion_out["face_occluded"],
+            # Multi-person head pose preview
+            "persons": [
+                ({"index": i} | head_pose_from_landmarks(lm)) for i, lm in enumerate(all_landmarks)
+            ],
+            # NCAP scoring (heuristic until protocol-config integrated)
         }
+        # NCAP scoring
+        ncap_out = ncap.score(payload)
+        payload.update({
+            "ncap_overall": ncap_out["overall"],
+            "ncap_mode": ncap_out["mode"],
+            "ncap_sections": ncap_out["sections"],
+            "ncap_notes": ncap_out["notes"],
+        })
         S.last_kpis = payload
         return JSONResponse(payload)
 

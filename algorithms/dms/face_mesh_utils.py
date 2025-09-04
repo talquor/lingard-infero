@@ -40,9 +40,20 @@ def mouth_aspect_ratio(landmarks: np.ndarray) -> float:
 
 def extract_landmarks(mp_results, image_width: int, image_height: int) -> np.ndarray | None:
     """Return Nx2 array of pixel coords for the first face landmarks, or None."""
-    if not mp_results.multi_face_landmarks:
+    if not getattr(mp_results, 'multi_face_landmarks', None):
         return None
     lm = mp_results.multi_face_landmarks[0].landmark
     pts = np.array([[p.x * image_width, p.y * image_height] for p in lm], dtype=np.float32)
     return pts
 
+
+def extract_all_landmarks(mp_results, image_width: int, image_height: int) -> List[np.ndarray]:
+    """Return list of Nx2 arrays for each face; empty list if none."""
+    out: List[np.ndarray] = []
+    if not getattr(mp_results, 'multi_face_landmarks', None):
+        return out
+    for face in mp_results.multi_face_landmarks:
+        lm = face.landmark
+        pts = np.array([[p.x * image_width, p.y * image_height] for p in lm], dtype=np.float32)
+        out.append(pts)
+    return out

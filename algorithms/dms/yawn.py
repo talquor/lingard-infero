@@ -24,13 +24,14 @@ class YawnEstimator:
         if landmarks is not None:
             mar = float(mouth_aspect_ratio(landmarks))
         else:
-            mar = 0.0
+            mar = None
 
         st = self.state
-        st.mar_hist.append((ts, mar))
+        if mar is not None:
+            st.mar_hist.append((ts, mar))
 
         # Detect yawn as sustained open mouth above threshold for >= min_duration
-        if mar >= self.mar_thresh_open:
+        if mar is not None and mar >= self.mar_thresh_open:
             if st.mouth_open_since is None:
                 st.mouth_open_since = ts
         else:
@@ -49,8 +50,7 @@ class YawnEstimator:
         is_yawning_now = st.mouth_open_since is not None and (ts - st.mouth_open_since) >= self.min_duration_s
 
         return {
-            "mar": round(mar, 3),
+            "mar": round(mar, 3) if mar is not None else None,
             "yawning": is_yawning_now,
             "yawns_per_min": round(yawns_per_min, 2),
         }
-
