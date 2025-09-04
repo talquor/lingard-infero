@@ -23,6 +23,7 @@ from algorithms.oms.child_presence import ChildPresenceEstimator
 from algorithms.oms.smoking import SmokingEstimator
 from algorithms.oms.hands_on_wheel import HandsOnWheelEstimator
 from algorithms.dms.occlusion import OcclusionEstimator
+from algorithms.utils.geometry import boxnorm_points, subsample, select_semantic_points
 
 # ---------- State ----------
 class State:
@@ -239,12 +240,29 @@ async def infer(request: Request):
             "oms_hands_on_wheel": hands_out["hands_on_wheel"],
             # DMS occlusion
             "dms_face_occluded": occlusion_out["face_occluded"],
-            # Multi-person head pose preview
-            "persons": [
-                ({"index": i} | head_pose_from_landmarks(lm)) for i, lm in enumerate(all_landmarks)
-            ],
+            # Multi-person head pose + keypoints (box-normalized)
+            "persons": [],
             # NCAP scoring (heuristic until protocol-config integrated)
         }
+        # Build persons array aligned to detections; fill from FaceMesh when available
+        persons = []
+        count = len(ann_boxes)
+        for i in range(count):
+            box = ann_boxes[i]
+            if i < len(all_landmarks):
+                lm = all_landmarks[i]
+                pose = head_pose_from_landmarks(lm)
+                kp_px = select_semantic_points(lm)
+                if not kp_px:
+                    kp_px = subsample(lm.tolist(), target=24)
+                kp_box = boxnorm_points(kp_px, box, w, h)
+                entry = {"index": i, **pose, "keypoints_box": kp_box}
+            else:
+                pose = head_pose_from_box(box)
+                pose["look_dir"] = "Straight" if abs(pose["yaw_deg"]) < 10 and abs(pose["pitch_deg"]) < 10 else ("Right" if pose["yaw_deg"] > 0 else "Left")
+                entry = {"index": i, **pose, "keypoints_box": []}
+            persons.append(entry)
+        payload["persons"] = persons
         # NCAP scoring
         ncap_out = ncap.score(payload)
         payload.update({

@@ -11,6 +11,7 @@ from algorithms.dms.head_gaze import head_pose_from_landmarks
 from algorithms.dms.distraction import DistractionEstimator
 from algorithms.scoring.ncap_scoring import NCAPScorer, NCAPConfig
 from pathlib import Path
+from algorithms.utils.geometry import boxnorm_points, subsample, select_semantic_points
 
 
 def make_landmarks(points: dict[int, tuple[float, float]], size: int = 468) -> np.ndarray:
@@ -186,6 +187,17 @@ class TestDistractionNCAP(unittest.TestCase):
         self.assertLess(out["sections"]["vigilance"], 100.0)
         self.assertLess(out["sections"]["distraction"], 100.0)
         self.assertLess(out["sections"]["impairment"], 100.0)
+
+class TestGeometry(unittest.TestCase):
+    def test_boxnorm_and_subsample(self):
+        w, h = 200, 100
+        box = [0.25, 0.2, 0.5, 0.6]  # normalized
+        # Create 100 random points inside the image
+        pts = [[50 + i, 30 + (i % 10)] for i in range(100)]
+        sub = subsample(pts, target=24)
+        self.assertLessEqual(len(sub), 24)
+        nb = boxnorm_points(sub, box, w, h)
+        self.assertTrue(all(0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 for x, y in nb))
 
     def test_ncap_load_config(self):
         # Ensure loader merges/overrides defaults
