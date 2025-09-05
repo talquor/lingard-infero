@@ -8,6 +8,7 @@ import numpy as np
 import mediapipe as mp
 import threading
 from collections import deque
+import logging
 
 # KPI algorithms
 from algorithms.dms.drowsiness import DrowsinessEstimator
@@ -52,6 +53,11 @@ mp_fm = mp.solutions.face_mesh
 detector = mp_fd.FaceDetection(model_selection=0, min_detection_confidence=0.5)
 face_mesh = mp_fm.FaceMesh(static_image_mode=False, max_num_faces=5, refine_landmarks=True, min_detection_confidence=0.5)
 mp_lock = threading.Lock()
+
+# Logging (one-line INFO summaries per inference)
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+log = logging.getLogger("lingard")
 
 # KPI estimators (stateful)
 drowsy = DrowsinessEstimator()
@@ -129,6 +135,7 @@ small {{ color:#9fb0c3; }}
     <div class="kpi"><h3>Head Yaw</h3><div class="big">{k.get('dms_head_yaw_deg','-')}°</div><div class="sub">pitch {k.get('dms_head_pitch_deg','-')}°</div></div>
     <div class="kpi"><h3>Eyes Off-Road</h3><div class="big">{k.get('dms_eyes_off_road_pct','-')}%</div><div class="sub">events {k.get('dms_eyes_off_road_events_per_min','-')}/min</div></div>
     <div class="kpi"><h3>Blink Stats</h3><div class="big">{k.get('dms_avg_blink_dur_ms','-')} ms</div><div class="sub">last {k.get('dms_time_since_last_blink_s','-')} s</div></div>
+    <div class="kpi"><h3>Eyes (EAR)</h3><div class="big">L {k.get('dms_left_ear','-')} | R {k.get('dms_right_ear','-')}</div><div class="sub">closed L:{k.get('dms_left_eye_closed','-')} R:{k.get('dms_right_eye_closed','-')}</div></div>
     <div class="kpi"><h3>Look Dir</h3><div class="big">{k.get('dms_look_direction','-')}</div><div class="sub">yaw {k.get('dms_head_yaw_deg','-')}°, pitch {k.get('dms_head_pitch_deg','-')}°</div></div>
   </div>
 
@@ -221,13 +228,20 @@ async def infer(request: Request):
             # Debug/diagnostics to validate blink/PERCLOS
             "dms_landmarks_ok": landmarks_ok,
             "dms_ear": drowsy_out.get("ear"),
+            "dms_left_ear": drowsy_out.get("left_ear"),
+            "dms_right_ear": drowsy_out.get("right_ear"),
+            "dms_left_eye_closed": drowsy_out.get("left_eye_closed"),
+            "dms_right_eye_closed": drowsy_out.get("right_eye_closed"),
             "dms_mar": yawn_out.get("mar"),
             "dms_perclos_pct": drowsy_out["perclos_pct"],
             "dms_blinks_per_min": drowsy_out["blinks_per_min"],
+            "dms_blink_detected": drowsy_out.get("blink_detected"),
             "dms_avg_blink_dur_ms": drowsy_out["avg_blink_dur_ms"],
             "dms_time_since_last_blink_s": drowsy_out["time_since_last_blink_s"],
             "dms_microsleep": drowsy_out["microsleep"],
             "dms_drowsiness_score": drowsy_out["drowsiness_score"],
+            "dms_fps_est": drowsy_out.get("fps_est"),
+            "dms_ear_thresh_closed": drowsy_out.get("ear_thresh_closed"),
             "dms_yawning": yawn_out["yawning"],
             "dms_yawns_per_min": yawn_out["yawns_per_min"],
             # Distraction
@@ -279,6 +293,30 @@ async def infer(request: Request):
             "ncap_sections": ncap_out["sections"],
             "ncap_notes": ncap_out["notes"],
         })
+        # Compact INFO log to verify KPIs are sane
+        try:
+            perclos = float(payload.get("dms_perclos_pct") or 0.0)
+            blinks = float(payload.get("dms_blinks_per_min") or 0.0)
+            yawns_pm = float(payload.get("dms_yawns_per_min") or 0.0)
+            eor_pct = float(payload.get("dms_eyes_off_road_pct") or 0.0)
+            ear = payload.get("dms_ear")
+            ear_s = f"{ear:.3f}" if isinstance(ear, (float, int)) and ear is not None else "NA"
+            log.info(
+                "200 OK faces=%d lat=%.1fms ear=%s perclos=%.1f blinks/min=%.1f yawns/min=%.2f microsleep=%s gaze=%s eor=%.1f ncap=%s",
+                S.last_boxes,
+                S.last_latency_ms,
+                ear_s,
+                perclos,
+                blinks,
+                yawns_pm,
+                str(payload.get("dms_microsleep")),
+                str(payload.get("dms_gaze_zone")),
+                eor_pct,
+                str(payload.get("ncap_overall")),
+            )
+        except Exception:
+            # Never break response due to logging
+            pass
         S.last_kpis = payload
         return JSONResponse(payload)
 

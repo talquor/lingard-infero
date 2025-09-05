@@ -84,6 +84,7 @@ class TestDrowsiness(unittest.TestCase):
             33: (100, 100), 133: (120, 100), 160: (110, 95), 153: (110, 105), 158: (112, 95), 144: (112, 105),
             263: (140, 100), 362: (120, 100), 387: (130, 95), 380: (130, 105), 385: (128, 95), 373: (128, 105),
         }))
+        self.assertTrue(out["blink_detected"])  # should flag blink now
         self.assertGreaterEqual(out["blinks_per_min"], 1.0)
         self.assertGreater(out["avg_blink_dur_ms"], 150.0)
         self.assertLess(out["avg_blink_dur_ms"], 400.0)
@@ -99,6 +100,24 @@ class TestDrowsiness(unittest.TestCase):
             }))
             ts += 0.05
         self.assertTrue(out["microsleep"])
+
+    def test_left_right_ear_and_closed_flags(self):
+        d = DrowsinessEstimator(ear_thresh_closed=0.21, microsleep_ms=1000)
+        ts = 0.0
+        # Left eye closed, right eye open
+        lm = make_landmarks({
+            # Left eye closed
+            33: (100, 100), 133: (120, 100), 160: (110, 99), 153: (110, 101), 158: (112, 99), 144: (112, 101),
+            # Right eye open
+            263: (140, 100), 362: (120, 100), 387: (130, 95), 380: (130, 105), 385: (128, 95), 373: (128, 105),
+        })
+        out = d.update(ts, lm)
+        self.assertIsNotNone(out["left_ear"])
+        self.assertIsNotNone(out["right_ear"])
+        self.assertLess(out["left_ear"], 0.21)
+        self.assertGreater(out["right_ear"], 0.21)
+        self.assertTrue(out["left_eye_closed"])  # left closed
+        self.assertFalse(out["right_eye_closed"])  # right open
 
 
 class TestYawn(unittest.TestCase):
