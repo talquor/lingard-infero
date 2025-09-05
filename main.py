@@ -50,7 +50,7 @@ app.add_middleware(
 mp_fd = mp.solutions.face_detection
 mp_fm = mp.solutions.face_mesh
 detector = mp_fd.FaceDetection(model_selection=0, min_detection_confidence=0.5)
-face_mesh = mp_fm.FaceMesh(static_image_mode=True, max_num_faces=5, refine_landmarks=True, min_detection_confidence=0.5)
+face_mesh = mp_fm.FaceMesh(static_image_mode=False, max_num_faces=5, refine_landmarks=True, min_detection_confidence=0.5)
 mp_lock = threading.Lock()
 
 # KPI estimators (stateful)
@@ -176,6 +176,7 @@ async def infer(request: Request):
         ts = time.time()
         drowsy_out = drowsy.update(ts, landmarks)
         yawn_out = yawn.update(ts, landmarks)
+        landmarks_ok = landmarks is not None
 
         # Head pose and gaze (prefer landmarks when available)
         if landmarks is not None:
@@ -217,6 +218,10 @@ async def infer(request: Request):
             "dms_head_pitch_deg": round(hp["pitch_deg"], 1),
             "dms_head_roll_deg": round(hp["roll_deg"], 1),
             "dms_look_direction": hp.get("look_dir", "Unknown"),
+            # Debug/diagnostics to validate blink/PERCLOS
+            "dms_landmarks_ok": landmarks_ok,
+            "dms_ear": drowsy_out.get("ear"),
+            "dms_mar": yawn_out.get("mar"),
             "dms_perclos_pct": drowsy_out["perclos_pct"],
             "dms_blinks_per_min": drowsy_out["blinks_per_min"],
             "dms_avg_blink_dur_ms": drowsy_out["avg_blink_dur_ms"],
