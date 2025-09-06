@@ -9,6 +9,7 @@ import mediapipe as mp
 import threading
 from collections import deque
 import logging
+from pydantic import BaseModel
 
 # KPI algorithms
 from algorithms.dms.drowsiness import DrowsinessEstimator
@@ -53,6 +54,7 @@ mp_fm = mp.solutions.face_mesh
 detector = mp_fd.FaceDetection(model_selection=0, min_detection_confidence=0.5)
 face_mesh = mp_fm.FaceMesh(static_image_mode=False, max_num_faces=5, refine_landmarks=True, min_detection_confidence=0.5)
 mp_lock = threading.Lock()
+cfg_lock = threading.Lock()
 
 # Logging (one-line INFO summaries per inference)
 if not logging.getLogger().handlers:
@@ -75,10 +77,63 @@ def np_from_jpeg(data: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(data)).convert("RGB")
     return np.array(img)
 
+
+# ---------- Config Models ----------
+class DMSConfig(BaseModel):
+    use_dynamic_threshold: bool | None = None
+    ear_thresh_closed: float | None = None
+    dynamic_rel_close: float | None = None
+    dynamic_rel_open: float | None = None
+    absolute_min_close: float | None = None
+    microsleep_ms: int | None = None
+    blink_min_s: float | None = None
+    blink_max_s: float | None = None
+    perclos_window_s: float | None = None
+    sleep_min_s: float | None = None
+
+
+def get_dms_config_dict():
+    return {
+        "use_dynamic_threshold": drowsy.use_dynamic_threshold,
+        "ear_thresh_closed": drowsy.ear_thresh_closed,
+        "dynamic_rel_close": drowsy.dynamic_rel_close,
+        "dynamic_rel_open": drowsy.dynamic_rel_open,
+        "absolute_min_close": drowsy.absolute_min_close,
+        "microsleep_ms": drowsy.microsleep_ms,
+        "blink_min_s": drowsy.blink_min_s,
+        "blink_max_s": drowsy.blink_max_s,
+        "perclos_window_s": getattr(drowsy, 'perclos_window_s', 30.0),
+        "sleep_min_s": getattr(drowsy, 'sleep_min_s', 3.0),
+    }
+
 # ---------- Routes ----------
 @app.get("/health")
 def health():
     return {"ok": True, "uptime_s": round(time.time() - S.start_ts, 1)}
+
+
+@app.get("/config/dms")
+def get_dms_config():
+    return {"ok": True, "config": get_dms_config_dict()}
+
+
+@app.patch("/config/dms")
+async def patch_dms_config(cfg: DMSConfig):
+    # Apply non-None values atomically
+    with cfg_lock:
+        for k, v in cfg.dict(exclude_none=True).items():
+            if hasattr(drowsy, k):
+                setattr(drowsy, k, v)
+    return {"ok": True, "config": get_dms_config_dict()}
+
+
+@app.post("/config/dms/reset")
+def reset_dms_state():
+    # Clear history to re-baseline thresholds and rates
+    with cfg_lock:
+        from algorithms.dms.drowsiness import DrowsinessState
+        drowsy.state = DrowsinessState()
+    return {"ok": True, "message": "DMS state reset"}
 
 @app.get("/", response_class=HTMLResponse)
 def home():
