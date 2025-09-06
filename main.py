@@ -303,6 +303,11 @@ async def infer(request: Request):
             all_landmarks = []
 
         ts = time.time()
+        # Assign persistent IDs for current detections
+        try:
+            ids = S.tracker.assign(ann_boxes, ts)
+        except Exception:
+            ids = list(range(1, len(ann_boxes) + 1))
         drowsy_out = drowsy.update(ts, landmarks)
         yawn_out = yawn.update(ts, landmarks)
         landmarks_ok = landmarks is not None
@@ -403,10 +408,41 @@ async def infer(request: Request):
         # Build persons array aligned to detections; fill from FaceMesh when available
         persons = []
         count = len(ann_boxes)
+        # If we have multiple landmark sets, match them to detection boxes by IoU of their min/max envelope
+        def _iou(a, b):
+            ax, ay, aw, ah = a; bx, by, bw, bh = b
+            ax2, ay2 = ax+aw, ay+ah; bx2, by2 = bx+bw, by+bh
+            ix1, iy1 = max(ax, bx), max(ay, by)
+            ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+            iw, ih = max(0.0, ix2-ix1), max(0.0, iy2-iy1)
+            inter = iw*ih
+            if inter <= 0: return 0.0
+            return inter / (aw*ah + bw*bh - inter + 1e-12)
+        det_to_lm = {}
+        if all_landmarks:
+            lm_boxes = []
+            for lm in all_landmarks:
+                xs = [p[0]/w for p in lm]
+                ys = [p[1]/h for p in lm]
+                minx, maxx = max(0.0, min(xs)), min(1.0, max(xs))
+                miny, maxy = max(0.0, min(ys)), min(1.0, max(ys))
+                lm_boxes.append([minx, miny, max(1e-6, maxx-minx), max(1e-6, maxy-miny)])
+            pairs = []
+            for i, db in enumerate(ann_boxes):
+                for j, lb in enumerate(lm_boxes):
+                    pairs.append((i, j, _iou(db, lb)))
+            pairs.sort(key=lambda t: t[2], reverse=True)
+            used_d, used_l = set(), set()
+            for i, j, u in pairs:
+                if u <= 0: continue
+                if i in used_d or j in used_l: continue
+                det_to_lm[i] = j
+                used_d.add(i); used_l.add(j)
         for i in range(count):
             box = ann_boxes[i]
-            if i < len(all_landmarks):
-                lm = all_landmarks[i]
+            lm_idx = det_to_lm.get(i)
+            if lm_idx is not None and lm_idx < len(all_landmarks):
+                lm = all_landmarks[lm_idx]
                 pose = head_pose_from_landmarks(lm)
                 kp_px = select_semantic_points(lm)
                 if not kp_px:
@@ -415,13 +451,22 @@ async def infer(request: Request):
                 # Eye keypoints for blink/microsleep (four points)
                 eye_px = eye_aperture_points(lm)
                 eye_box = boxnorm_points(eye_px, box, w, h)
-                entry = {"index": i, **pose, "keypoints_box": kp_box, "eye_points_box": eye_box}
+                entry = {"index": i, "id": ids[i] if i < len(ids) else None, **pose, "keypoints_box": kp_box, "eye_points_box": eye_box}
             else:
                 pose = head_pose_from_box(box)
                 pose["look_dir"] = "Straight" if abs(pose["yaw_deg"]) < 10 and abs(pose["pitch_deg"]) < 10 else ("Right" if pose["yaw_deg"] > 0 else "Left")
-                entry = {"index": i, **pose, "keypoints_box": [], "eye_points_box": []}
+                entry = {"index": i, "id": ids[i] if i < len(ids) else None, **pose, "keypoints_box": [], "eye_points_box": []}
             persons.append(entry)
+        # Active person: choose largest box area
+        active_idx = None
+        if ann_boxes:
+            areas = [b[2]*b[3] for b in ann_boxes]
+            active_idx = int(max(range(len(areas)), key=lambda k: areas[k])) if areas else None
+        active_id = (ids[active_idx] if active_idx is not None and active_idx < len(ids) else None) if ann_boxes else None
         payload["persons"] = persons
+        payload["person_ids"] = ids
+        payload["active_person_index"] = active_idx
+        payload["active_person_id"] = active_id
         # NCAP scoring
         ncap_out = ncap.score(payload)
         payload.update({
@@ -439,7 +484,7 @@ async def infer(request: Request):
             ear = payload.get("dms_ear")
             ear_s = f"{ear:.3f}" if isinstance(ear, (float, int)) and ear is not None else "NA"
             log.info(
-                "200 OK faces=%d lat=%.1fms ear=%s perclos=%.1f blinks/min=%.1f yawns/min=%.2f microsleep=%s gaze=%s eor=%.1f ncap=%s",
+                "200 OK faces=%d lat=%.1fms ear=%s perclos=%.1f blinks/min=%.1f yawns/min=%.2f microsleep=%s gaze=%s eor=%.1f ncap=%s ids=%s active=%s",
                 S.last_boxes,
                 S.last_latency_ms,
                 ear_s,
@@ -450,6 +495,8 @@ async def infer(request: Request):
                 str(payload.get("dms_gaze_zone")),
                 eor_pct,
                 str(payload.get("ncap_overall")),
+                str(payload.get("person_ids")),
+                str(payload.get("active_person_id")),
             )
         except Exception:
             # Never break response due to logging
