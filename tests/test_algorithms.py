@@ -178,16 +178,30 @@ class TestHeadPose(unittest.TestCase):
 
 class TestDistractionNCAP(unittest.TestCase):
     def test_distraction_events(self):
-        d = DistractionEstimator(onroad_threshold_pct=60.0, event_dwell_s=2.0, window_s=60.0)
+        d = DistractionEstimator(onroad_threshold_pct=60.0, lizard_short_min_s=0.5, lizard_long_s=2.0, window_s=60.0,
+                                 owl_yaw_th_deg=20.0, owl_short_min_s=0.5, owl_long_s=2.0)
         ts = 0.0
-        # 3 seconds off-road to trigger one event
-        for _ in range(60):
-            out = d.update(ts, 30.0)
+        # 1.0s off-road -> short lizard event when returning on-road
+        for _ in range(20):
+            out = d.update(ts, 30.0, yaw_deg=5.0)
             ts += 0.05
-        self.assertTrue(out["eyes_off_road_event_active"])  # still active
-        # back on road to close the event
-        out = d.update(ts, 90.0)
-        self.assertGreaterEqual(out["eyes_off_road_events_per_min"], 1.0)
+        # back on road to close
+        out = d.update(ts, 90.0, yaw_deg=5.0)
+        self.assertTrue(out["eyes_off_short_per_min"] > 0)
+
+        # 2.5s off-road -> long lizard
+        for _ in range(50):
+            out = d.update(ts, 30.0, yaw_deg=5.0)
+            ts += 0.05
+        out = d.update(ts, 90.0, yaw_deg=5.0)
+        self.assertTrue(out["eyes_off_long_per_min"] > 0)
+
+        # Owl short: yaw above threshold for 1.0s
+        for _ in range(20):
+            out = d.update(ts, 90.0, yaw_deg=30.0)
+            ts += 0.05
+        out = d.update(ts, 90.0, yaw_deg=0.0)
+        self.assertTrue(out["owl_short_per_min"] > 0)
 
     def test_ncap_penalties(self):
         scorer = NCAPScorer()

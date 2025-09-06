@@ -92,6 +92,16 @@ class DMSConfig(BaseModel):
     sleep_min_s: float | None = None
 
 
+class DistractionConfig(BaseModel):
+    onroad_threshold_pct: float | None = None
+    lizard_short_min_s: float | None = None
+    lizard_long_s: float | None = None
+    window_s: float | None = None
+    owl_yaw_th_deg: float | None = None
+    owl_short_min_s: float | None = None
+    owl_long_s: float | None = None
+
+
 def get_dms_config_dict():
     return {
         "use_dynamic_threshold": drowsy.use_dynamic_threshold,
@@ -104,6 +114,18 @@ def get_dms_config_dict():
         "blink_max_s": drowsy.blink_max_s,
         "perclos_window_s": getattr(drowsy, 'perclos_window_s', 30.0),
         "sleep_min_s": getattr(drowsy, 'sleep_min_s', 3.0),
+    }
+
+
+def get_distraction_config_dict():
+    return {
+        "onroad_threshold_pct": distraction.onroad_threshold_pct,
+        "lizard_short_min_s": distraction.lizard_short_min_s,
+        "lizard_long_s": distraction.lizard_long_s,
+        "window_s": distraction.window_s,
+        "owl_yaw_th_deg": distraction.owl_yaw_th_deg,
+        "owl_short_min_s": distraction.owl_short_min_s,
+        "owl_long_s": distraction.owl_long_s,
     }
 
 # ---------- Routes ----------
@@ -134,6 +156,20 @@ def reset_dms_state():
         from algorithms.dms.drowsiness import DrowsinessState
         drowsy.state = DrowsinessState()
     return {"ok": True, "message": "DMS state reset"}
+
+
+@app.get("/config/distraction")
+def get_distraction_config():
+    return {"ok": True, "config": get_distraction_config_dict()}
+
+
+@app.patch("/config/distraction")
+async def patch_distraction_config(cfg: DistractionConfig):
+    with cfg_lock:
+        for k, v in cfg.dict(exclude_none=True).items():
+            if hasattr(distraction, k):
+                setattr(distraction, k, v)
+    return {"ok": True, "config": get_distraction_config_dict()}
 
 @app.get("/", response_class=HTMLResponse)
 def home():
@@ -189,7 +225,8 @@ small {{ color:#9fb0c3; }}
     <div class="kpi"><h3>Yawn</h3><div class="big">{('Yes' if k.get('dms_yawning') else 'No') if k else '-'}</div><div class="sub">sustained mouth open</div></div>
     <div class="kpi"><h3>Gaze</h3><div class="big">{k.get('dms_gaze_zone','-')}</div><div class="sub">on-road {k.get('dms_gaze_on_road_pct','-')}%</div></div>
     <div class="kpi"><h3>Head Yaw</h3><div class="big">{k.get('dms_head_yaw_deg','-')}°</div><div class="sub">pitch {k.get('dms_head_pitch_deg','-')}°</div></div>
-    <div class="kpi"><h3>Eyes Off-Road</h3><div class="big">{k.get('dms_eyes_off_road_pct','-')}%</div><div class="sub">events {k.get('dms_eyes_off_road_events_per_min','-')}/min</div></div>
+    <div class="kpi"><h3>Eyes Off-Road</h3><div class="big">{k.get('dms_eyes_off_road_pct','-')}%</div><div class="sub">short {k.get('dms_eyes_off_short_per_min','-')}/m • long {k.get('dms_eyes_off_long_per_min','-')}/m</div></div>
+    <div class="kpi"><h3>Owl</h3><div class="big">{('Long' if k.get('dms_owl_long_active') else ('Short' if k.get('dms_owl_short_active') else 'No'))}</div><div class="sub">dwell {k.get('dms_owl_yaw_dwell_s','-')} s</div></div>
     <div class="kpi"><h3>Blink Stats</h3><div class="big">{k.get('dms_avg_blink_dur_ms','-')} ms</div><div class="sub">last {k.get('dms_time_since_last_blink_s','-')} s, fps {k.get('dms_fps_est','-')}</div></div>
     <div class="kpi"><h3>Eyes (EAR)</h3><div class="big">L {k.get('dms_left_ear','-')} | R {k.get('dms_right_ear','-')}</div><div class="sub">closed L:{k.get('dms_left_eye_closed','-')} R:{k.get('dms_right_eye_closed','-')}</div></div>
     <div class="kpi"><h3>Look Dir</h3><div class="big">{k.get('dms_look_direction','-')}</div><div class="sub">yaw {k.get('dms_head_yaw_deg','-')}°, pitch {k.get('dms_head_pitch_deg','-')}°</div></div>
@@ -251,8 +288,11 @@ async def infer(request: Request):
             hp = {"yaw_deg": 0.0, "pitch_deg": 0.0, "roll_deg": 0.0, "look_dir": "Unknown"}
         gz = gaze_zone_from_head(hp["yaw_deg"], hp["pitch_deg"]) if ann_boxes else {"gaze_zone": "Unknown", "gaze_on_road_pct": None}
 
-        # Distraction KPIs from on-road estimate
-        dis_out = distraction.update(ts, gz["gaze_on_road_pct"]) if gz["gaze_on_road_pct"] is not None else distraction.update(ts, None)
+        # Distraction KPIs from on-road estimate and head yaw
+        if gz["gaze_on_road_pct"] is not None:
+            dis_out = distraction.update(ts, gz["gaze_on_road_pct"], hp["yaw_deg"])
+        else:
+            dis_out = distraction.update(ts, None, hp["yaw_deg"])
 
         # Update status
         S.last_ok_ts = time.time()
@@ -305,11 +345,18 @@ async def infer(request: Request):
             "dms_perclos_window_s": drowsy_out.get("perclos_window_s"),
             "dms_yawning": yawn_out["yawning"],
             "dms_yawns_per_min": yawn_out["yawns_per_min"],
-            # Distraction
+            # Distraction (lizard: eyes-off-road; owl: head yaw)
             "dms_eyes_off_road_pct": dis_out["eyes_off_road_pct"],
-            "dms_eyes_off_road_events_per_min": dis_out["eyes_off_road_events_per_min"],
             "dms_eyes_off_road_dwell_s": dis_out["eyes_off_road_dwell_s"],
-            "dms_eyes_off_road_event_active": dis_out["eyes_off_road_event_active"],
+            "dms_eyes_off_short_active": dis_out["eyes_off_short_active"],
+            "dms_eyes_off_long_active": dis_out["eyes_off_long_active"],
+            "dms_eyes_off_short_per_min": dis_out["eyes_off_short_per_min"],
+            "dms_eyes_off_long_per_min": dis_out["eyes_off_long_per_min"],
+            "dms_owl_yaw_dwell_s": dis_out["owl_yaw_dwell_s"],
+            "dms_owl_short_active": dis_out["owl_short_active"],
+            "dms_owl_long_active": dis_out["owl_long_active"],
+            "dms_owl_short_per_min": dis_out["owl_short_per_min"],
+            "dms_owl_long_per_min": dis_out["owl_long_per_min"],
             # OMS
             "oms_occupant_count": oms["occupant_count"],
             "oms_cabin_occupied": oms["cabin_occupied"],
