@@ -475,6 +475,136 @@ async def infer(request: Request):
             "ncap_sections": ncap_out["sections"],
             "ncap_notes": ncap_out["notes"],
         })
+
+        # ---------- Structured KPIs (nested) ----------
+        # High-level classifications
+        def classify_sleep():
+            if payload.get("dms_sleep_active"):
+                return "Sleep"
+            if payload.get("dms_microsleep"):
+                return "Microsleep"
+            return "Awake"
+
+        def classify_attention():
+            # Attentive if on-road >= threshold and no active distraction
+            onroad = payload.get("dms_gaze_on_road_pct")
+            eyes_short = payload.get("dms_eyes_off_short_active")
+            eyes_long = payload.get("dms_eyes_off_long_active")
+            owl_short = payload.get("dms_owl_short_active")
+            owl_long = payload.get("dms_owl_long_active")
+            if onroad is None:
+                return "Unknown"
+            if eyes_long or owl_long:
+                return "Distracted-Long"
+            if eyes_short or owl_short:
+                return "Distracted-Short"
+            if onroad >= max(0.0, float(distraction.onroad_threshold_pct)):
+                return "Attentive"
+            return "Distracted"
+
+        sleep_state = classify_sleep()
+        attention_state = classify_attention()
+
+        # Build nested KPI structure; keep existing flat fields for backward compatibility
+        payload["kpi_version"] = "1.0"
+        payload["kpis"] = {
+            "dms": {
+                "high_level": {
+                    "sleep_state": sleep_state,
+                    "drowsiness_score": payload.get("dms_drowsiness_score"),
+                    "yawning": payload.get("dms_yawning"),
+                    "yawns_per_min": payload.get("dms_yawns_per_min"),
+                    "attention_state": attention_state,
+                },
+                "mid_level": {
+                    "ears": {
+                        "left": payload.get("dms_left_ear"),
+                        "right": payload.get("dms_right_ear"),
+                        "left_closed": payload.get("dms_left_eye_closed"),
+                        "right_closed": payload.get("dms_right_eye_closed"),
+                        "thresholds": {
+                            "close": payload.get("dms_ear_thresh_closed"),
+                            "open": payload.get("dms_ear_thresh_open"),
+                        }
+                    },
+                    "perclos_pct": payload.get("dms_perclos_pct"),
+                    "blinks_per_min": payload.get("dms_blinks_per_min"),
+                    "blink": {
+                        "avg_duration_ms": payload.get("dms_avg_blink_dur_ms"),
+                        "time_since_last_s": payload.get("dms_time_since_last_blink_s"),
+                        "detected": payload.get("dms_blink_detected"),
+                    },
+                    "microsleep": {
+                        "active": payload.get("dms_microsleep"),
+                        "dwell_s": payload.get("dms_microsleep_dwell_s"),
+                    },
+                    "sleep": {
+                        "active": payload.get("dms_sleep_active"),
+                        "dwell_s": payload.get("dms_sleep_dwell_s"),
+                    },
+                    "head_pose": {
+                        "yaw_deg": payload.get("dms_head_yaw_deg"),
+                        "pitch_deg": payload.get("dms_head_pitch_deg"),
+                        "roll_deg": payload.get("dms_head_roll_deg"),
+                        "look_dir": payload.get("dms_look_direction"),
+                    },
+                    "gaze": {
+                        "zone": payload.get("dms_gaze_zone"),
+                        "on_road_pct": payload.get("dms_gaze_on_road_pct"),
+                    },
+                    "distraction": {
+                        "lizard": {
+                            "off_road_pct": payload.get("dms_eyes_off_road_pct"),
+                            "dwell_s": payload.get("dms_eyes_off_road_dwell_s"),
+                            "short_active": payload.get("dms_eyes_off_short_active"),
+                            "long_active": payload.get("dms_eyes_off_long_active"),
+                            "short_per_min": payload.get("dms_eyes_off_short_per_min"),
+                            "long_per_min": payload.get("dms_eyes_off_long_per_min"),
+                        },
+                        "owl": {
+                            "yaw_dwell_s": payload.get("dms_owl_yaw_dwell_s"),
+                            "short_active": payload.get("dms_owl_short_active"),
+                            "long_active": payload.get("dms_owl_long_active"),
+                            "short_per_min": payload.get("dms_owl_short_per_min"),
+                            "long_per_min": payload.get("dms_owl_long_per_min"),
+                        }
+                    },
+                    "quality": {
+                        "landmarks_ok": payload.get("dms_landmarks_ok"),
+                        "fps_est": payload.get("dms_fps_est"),
+                        "perclos_window_s": payload.get("dms_perclos_window_s"),
+                    }
+                },
+            },
+            "oms": {
+                "high_level": {
+                    "occupants": payload.get("oms_occupant_count"),
+                    "cabin_occupied": payload.get("oms_cabin_occupied"),
+                },
+                "mid_level": {
+                    "flags": {
+                        "phone_use": payload.get("oms_phone_use"),
+                        "seatbelt_fastened": payload.get("oms_seatbelt_fastened"),
+                        "child_present": payload.get("oms_child_present"),
+                        "smoking": payload.get("oms_smoking"),
+                        "hands_on_wheel": payload.get("oms_hands_on_wheel"),
+                    }
+                }
+            },
+            "scoring": {
+                "ncap": {
+                    "overall": payload.get("ncap_overall"),
+                    "mode": payload.get("ncap_mode"),
+                    "sections": payload.get("ncap_sections"),
+                    "notes": payload.get("ncap_notes"),
+                }
+            },
+            "persons": {
+                "active_index": payload.get("active_person_index"),
+                "active_id": payload.get("active_person_id"),
+                "ids": payload.get("person_ids"),
+            }
+        }
         # Compact INFO log to verify KPIs are sane
         try:
             perclos = float(payload.get("dms_perclos_pct") or 0.0)
