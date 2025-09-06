@@ -14,6 +14,8 @@ class DrowsinessState:
     eye_closed_since: float | None = None
     blinks: Deque[tuple[float, float]] = field(default_factory=lambda: deque(maxlen=300))  # (ts, duration)
     yawns: Deque[float] = field(default_factory=lambda: deque(maxlen=300))  # yawn timestamps (optional use here)
+    last_ts: float = 0.0
+    last_valid_ts: float = 0.0
 
 
 class DrowsinessEstimator:
@@ -29,6 +31,7 @@ class DrowsinessEstimator:
         absolute_min_close: float = 0.15,
         perclos_window_s: float = 30.0,
         sleep_min_s: float = 3.0,
+        dropout_grace_s: float = 0.2,
     ):
         self.state = DrowsinessState()
         self.ear_thresh_closed = ear_thresh_closed
@@ -41,6 +44,7 @@ class DrowsinessEstimator:
         self.absolute_min_close = absolute_min_close
         self.perclos_window_s = perclos_window_s
         self.sleep_min_s = sleep_min_s
+        self.dropout_grace_s = dropout_grace_s
 
     def update(self, ts: float, landmarks: np.ndarray | None) -> Dict[str, float | bool]:
         # Compute EAR if landmarks are available; if not, skip updates that infer closure
@@ -54,9 +58,11 @@ class DrowsinessEstimator:
             ear = None  # treat as missing data
 
         st = self.state
+        st.last_ts = ts
         # Add to history
         if ear is not None:
             st.ear_hist.append((ts, ear))
+            st.last_valid_ts = ts
 
         # Blink detection: transition open->closed->open below/above thresholds
         blink_detected = False
@@ -101,14 +107,16 @@ class DrowsinessEstimator:
         microsleep_dwell_s = 0.0
         sleep_event_active = False
         sleep_dwell_s = 0.0
-        if st.eye_closed_since is not None and ear is not None:
-            dwell = ts - st.eye_closed_since
-            microsleep_dwell_s = round(dwell, 2)
-            if dwell * 1000.0 >= self.microsleep_ms:
-                microsleep = True
-            if dwell >= self.sleep_min_s:
-                sleep_event_active = True
-                sleep_dwell_s = round(dwell, 2)
+        if st.eye_closed_since is not None:
+            # Continue dwell through brief landmark dropouts
+            if ear is not None or (ts - st.last_valid_ts) <= self.dropout_grace_s:
+                dwell = ts - st.eye_closed_since
+                microsleep_dwell_s = round(dwell, 2)
+                if dwell * 1000.0 >= self.microsleep_ms:
+                    microsleep = True
+                if dwell >= self.sleep_min_s:
+                    sleep_event_active = True
+                    sleep_dwell_s = round(dwell, 2)
 
         # Compute PERCLOS over configured window as percent of time eyes closed
         window_s = self.perclos_window_s

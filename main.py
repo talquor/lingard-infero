@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from algorithms.dms.drowsiness import DrowsinessEstimator
 from algorithms.dms.yawn import YawnEstimator
 from algorithms.dms.head_gaze import head_pose_from_box, gaze_zone_from_head, head_pose_from_landmarks
-from algorithms.dms.face_mesh_utils import extract_landmarks, extract_all_landmarks, eye_aperture_points
+from algorithms.dms.face_mesh_utils import extract_landmarks, extract_all_landmarks, eye_aperture_points, lizard_direction_from_iris
 from algorithms.oms.occupants import occupant_metrics_from_faces
 from algorithms.dms.distraction import DistractionEstimator
 from algorithms.scoring.ncap_scoring import NCAPScorer
@@ -26,6 +26,7 @@ from algorithms.oms.smoking import SmokingEstimator
 from algorithms.oms.hands_on_wheel import HandsOnWheelEstimator
 from algorithms.dms.occlusion import OcclusionEstimator
 from algorithms.utils.geometry import boxnorm_points, subsample, select_semantic_points
+from algorithms.utils.tracker import BoxTracker
 
 # ---------- State ----------
 class State:
@@ -38,6 +39,11 @@ class State:
         self.last_boxes = 0
         self.last_face_conf = 0.0
         self.last_kpis = {}
+     
+        # Tracking and per-person DMS
+        self.tracker = BoxTracker()
+        self.dms_by_id: dict[int, DrowsinessEstimator] = {}
+        self.dms_last_seen: dict[int, float] = {}
 
 S = State()
 
@@ -100,6 +106,7 @@ class DistractionConfig(BaseModel):
     owl_yaw_th_deg: float | None = None
     owl_short_min_s: float | None = None
     owl_long_s: float | None = None
+    owl_pitch_th_deg: float | None = None
 
 
 class TrackerConfig(BaseModel):
@@ -133,6 +140,7 @@ def get_distraction_config_dict():
         "owl_yaw_th_deg": distraction.owl_yaw_th_deg,
         "owl_short_min_s": distraction.owl_short_min_s,
         "owl_long_s": distraction.owl_long_s,
+        "owl_pitch_th_deg": distraction.owl_pitch_th_deg,
     }
 
 
@@ -324,9 +332,11 @@ async def infer(request: Request):
 
         # Distraction KPIs from on-road estimate and head yaw
         if gz["gaze_on_road_pct"] is not None:
-            dis_out = distraction.update(ts, gz["gaze_on_road_pct"], hp["yaw_deg"])
+            dis_out = distraction.update(ts, gz["gaze_on_road_pct"], hp["yaw_deg"], hp["pitch_deg"])
         else:
-            dis_out = distraction.update(ts, None, hp["yaw_deg"])
+            dis_out = distraction.update(ts, None, hp["yaw_deg"], hp["pitch_deg"])
+
+        # (moved) iris-based lizard direction computed later after det->lm matching and active selection
 
         # Update status
         S.last_ok_ts = time.time()
@@ -391,6 +401,8 @@ async def infer(request: Request):
             "dms_owl_long_active": dis_out["owl_long_active"],
             "dms_owl_short_per_min": dis_out["owl_short_per_min"],
             "dms_owl_long_per_min": dis_out["owl_long_per_min"],
+            "dms_owl_direction": dis_out["owl_direction"],
+            "dms_lizard_direction": dis_out["lizard_direction"],
             # OMS
             "oms_occupant_count": oms["occupant_count"],
             "oms_cabin_occupied": oms["cabin_occupied"],
@@ -451,7 +463,25 @@ async def infer(request: Request):
                 # Eye keypoints for blink/microsleep (four points)
                 eye_px = eye_aperture_points(lm)
                 eye_box = boxnorm_points(eye_px, box, w, h)
-                entry = {"index": i, "id": ids[i] if i < len(ids) else None, **pose, "keypoints_box": kp_box, "eye_points_box": eye_box}
+                # Per-person DMS (stateful) keyed by ID
+                pid = ids[i] if i < len(ids) else None
+                person_kpis = None
+                if pid is not None:
+                    est = S.dms_by_id.get(pid)
+                    if est is None:
+                        est = DrowsinessEstimator()
+                        S.dms_by_id[pid] = est
+                    S.dms_last_seen[pid] = ts
+                    outp = est.update(ts, lm)
+                    person_kpis = {
+                        "ear": outp.get("ear"),
+                        "left_ear": outp.get("left_ear"),
+                        "right_ear": outp.get("right_ear"),
+                        "blink_detected": outp.get("blink_detected"),
+                        "microsleep": outp.get("microsleep"),
+                        "perclos_pct": outp.get("perclos_pct"),
+                    }
+                entry = {"index": i, "id": pid, **pose, "keypoints_box": kp_box, "eye_points_box": eye_box, "kpis": person_kpis}
             else:
                 pose = head_pose_from_box(box)
                 pose["look_dir"] = "Straight" if abs(pose["yaw_deg"]) < 10 and abs(pose["pitch_deg"]) < 10 else ("Right" if pose["yaw_deg"] > 0 else "Left")
@@ -467,6 +497,21 @@ async def infer(request: Request):
         payload["person_ids"] = ids
         payload["active_person_index"] = active_idx
         payload["active_person_id"] = active_id
+
+        # If iris landmarks are present, override lizard direction using iris-based gaze for active face
+        if all_landmarks and active_idx is not None:
+            lm_idx2 = det_to_lm.get(active_idx)
+            if lm_idx2 is not None and lm_idx2 < len(all_landmarks):
+                lm_active = all_landmarks[lm_idx2]
+                iris_dir, _ = lizard_direction_from_iris(lm_active, w, h, yaw_pitch_dir=dis_out.get("owl_direction"))
+                if iris_dir:
+                    payload["dms_lizard_direction"] = iris_dir
+
+        # Cleanup stale per-person DMS states
+        to_del = [pid for pid, last in S.dms_last_seen.items() if ts - last > 10.0]
+        for pid in to_del:
+            S.dms_last_seen.pop(pid, None)
+            S.dms_by_id.pop(pid, None)
         # NCAP scoring
         ncap_out = ncap.score(payload)
         payload.update({
@@ -515,6 +560,8 @@ async def infer(request: Request):
                     "yawning": payload.get("dms_yawning"),
                     "yawns_per_min": payload.get("dms_yawns_per_min"),
                     "attention_state": attention_state,
+                    "owl_direction": payload.get("dms_owl_direction"),
+                    "lizard_direction": payload.get("dms_lizard_direction"),
                 },
                 "mid_level": {
                     "ears": {
@@ -560,6 +607,7 @@ async def infer(request: Request):
                             "long_active": payload.get("dms_eyes_off_long_active"),
                             "short_per_min": payload.get("dms_eyes_off_short_per_min"),
                             "long_per_min": payload.get("dms_eyes_off_long_per_min"),
+                            "direction": payload.get("dms_lizard_direction"),
                         },
                         "owl": {
                             "yaw_dwell_s": payload.get("dms_owl_yaw_dwell_s"),
@@ -567,6 +615,7 @@ async def infer(request: Request):
                             "long_active": payload.get("dms_owl_long_active"),
                             "short_per_min": payload.get("dms_owl_short_per_min"),
                             "long_per_min": payload.get("dms_owl_long_per_min"),
+                            "direction": payload.get("dms_owl_direction"),
                         }
                     },
                     "quality": {
@@ -635,6 +684,8 @@ async def infer(request: Request):
         return JSONResponse(payload)
 
     except Exception as e:
+        # Log full traceback for rapid debugging
+        log.exception("/infer failed")
         S.last_error = str(e)
         S.last_latency_ms = (time.perf_counter() - t0) * 1000.0
         return JSONResponse({"error": S.last_error}, status_code=500)

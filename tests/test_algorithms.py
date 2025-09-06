@@ -179,28 +179,39 @@ class TestHeadPose(unittest.TestCase):
 class TestDistractionNCAP(unittest.TestCase):
     def test_distraction_events(self):
         d = DistractionEstimator(onroad_threshold_pct=60.0, lizard_short_min_s=0.5, lizard_long_s=2.0, window_s=60.0,
-                                 owl_yaw_th_deg=20.0, owl_short_min_s=0.5, owl_long_s=2.0)
+                                 owl_yaw_th_deg=20.0, owl_short_min_s=0.5, owl_long_s=2.0, owl_pitch_th_deg=12.0)
         ts = 0.0
         # 1.0s off-road -> short lizard event when returning on-road
         for _ in range(20):
-            out = d.update(ts, 30.0, yaw_deg=5.0)
+            out = d.update(ts, 30.0, yaw_deg=5.0, pitch_deg=0.0)
             ts += 0.05
         # back on road to close
-        out = d.update(ts, 90.0, yaw_deg=5.0)
+        out = d.update(ts, 90.0, yaw_deg=5.0, pitch_deg=0.0)
         self.assertTrue(out["eyes_off_short_per_min"] > 0)
 
         # 2.5s off-road -> long lizard
         for _ in range(50):
-            out = d.update(ts, 30.0, yaw_deg=5.0)
+            out = d.update(ts, 30.0, yaw_deg=5.0, pitch_deg=0.0)
             ts += 0.05
-        out = d.update(ts, 90.0, yaw_deg=5.0)
+        out = d.update(ts, 90.0, yaw_deg=5.0, pitch_deg=0.0)
         self.assertTrue(out["eyes_off_long_per_min"] > 0)
 
         # Owl short: yaw above threshold for 1.0s
         for _ in range(20):
-            out = d.update(ts, 90.0, yaw_deg=30.0)
+            out = d.update(ts, 90.0, yaw_deg=30.0, pitch_deg=0.0)
             ts += 0.05
-        out = d.update(ts, 90.0, yaw_deg=0.0)
+        out = d.update(ts, 90.0, yaw_deg=0.0, pitch_deg=0.0)
+        # Direction tests
+        out = d.update(ts, 90.0, yaw_deg=30.0, pitch_deg=0.0)
+        self.assertEqual(out.get('owl_direction'), 'Right')
+        out = d.update(ts, 90.0, yaw_deg=-30.0, pitch_deg=0.0)
+        self.assertEqual(out.get('owl_direction'), 'Left')
+        out = d.update(ts, 90.0, yaw_deg=0.0, pitch_deg=20.0)
+        self.assertEqual(out.get('owl_direction'), 'Up')
+        out = d.update(ts, 90.0, yaw_deg=0.0, pitch_deg=-20.0)
+        self.assertEqual(out.get('owl_direction'), 'Down')
+        out = d.update(ts, 90.0, yaw_deg=0.0, pitch_deg=0.0)
+        self.assertEqual(out.get('owl_direction'), 'Focused')
         self.assertTrue(out["owl_short_per_min"] > 0)
 
     def test_ncap_penalties(self):

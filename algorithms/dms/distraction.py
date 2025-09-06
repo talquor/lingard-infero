@@ -28,6 +28,7 @@ class DistractionEstimator:
         owl_yaw_th_deg: float = 20.0,
         owl_short_min_s: float = 0.2,
         owl_long_s: float = 2.0,
+        owl_pitch_th_deg: float = 12.0,
     ):
         self.onroad_threshold_pct = onroad_threshold_pct
         self.lizard_short_min_s = lizard_short_min_s
@@ -36,9 +37,10 @@ class DistractionEstimator:
         self.owl_yaw_th_deg = owl_yaw_th_deg
         self.owl_short_min_s = owl_short_min_s
         self.owl_long_s = owl_long_s
+        self.owl_pitch_th_deg = owl_pitch_th_deg
         self.state = DistractionState()
 
-    def update(self, ts: float, onroad_pct: Optional[float], yaw_deg: Optional[float] = None) -> Dict[str, float | int | bool]:
+    def update(self, ts: float, onroad_pct: Optional[float], yaw_deg: Optional[float] = None, pitch_deg: Optional[float] = None) -> Dict[str, float | int | bool | str]:
         st = self.state
 
         # Add to history
@@ -100,6 +102,27 @@ class DistractionEstimator:
         owl_short_rpm = to_rate(len(st.owl_short_events))
         owl_long_rpm = to_rate(len(st.owl_long_events))
 
+        # Direction classification
+        def dir_from_yaw_pitch(yaw: Optional[float], pitch: Optional[float]) -> str:
+            if yaw is None and pitch is None:
+                return "Unknown"
+            y = yaw or 0.0
+            p = pitch or 0.0
+            if abs(y) < self.owl_yaw_th_deg and abs(p) < self.owl_pitch_th_deg:
+                return "Focused"
+            if abs(y) >= abs(p):
+                return "Right" if y > 0 else "Left"
+            else:
+                return "Up" if p > 0 else "Down"
+
+        owl_direction = dir_from_yaw_pitch(yaw_deg, pitch_deg)
+        if onroad_pct is None:
+            lizard_direction = "Unknown"
+        elif onroad_pct >= self.onroad_threshold_pct:
+            lizard_direction = "Focused"
+        else:
+            lizard_direction = owl_direction  # proxy until eye-gaze specific estimator is available
+
         return {
             "eyes_off_road_pct": round(offroad_pct, 1),
             "eyes_off_road_dwell_s": round(lizard_dwell, 2),
@@ -112,4 +135,6 @@ class DistractionEstimator:
             "owl_long_active": owl_long_active,
             "owl_short_per_min": owl_short_rpm,
             "owl_long_per_min": owl_long_rpm,
+            "owl_direction": owl_direction,
+            "lizard_direction": lizard_direction,
         }

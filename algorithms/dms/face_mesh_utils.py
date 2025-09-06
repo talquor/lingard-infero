@@ -53,6 +53,70 @@ def eye_aperture_points(landmarks: np.ndarray) -> list[list[float]]:
             [float(rb[0]), float(rb[1])]]
 
 
+# Iris landmark indices when FaceMesh refine_landmarks=True
+# Right iris: 469-472; Left iris: 474-477 (MediaPipe convention)
+RIGHT_IRIS = [469, 470, 471, 472]
+LEFT_IRIS = [474, 475, 476, 477]
+
+
+def iris_centers(landmarks: np.ndarray) -> tuple[list[float] | None, list[float] | None]:
+    """Return (left_iris_center[x,y], right_iris_center[x,y]) in pixel coords, or (None,None) if unavailable."""
+    n = landmarks.shape[0] if hasattr(landmarks, 'shape') else 0
+    def _center(idx):
+        pts = [landmarks[i] for i in idx if 0 <= i < n]
+        if len(pts) < 3:
+            return None
+        c = np.mean(np.array(pts, dtype=np.float32), axis=0)
+        return [float(c[0]), float(c[1])]
+    r = _center(RIGHT_IRIS)
+    l = _center(LEFT_IRIS)
+    return l, r
+
+
+def eye_boxes(landmarks: np.ndarray, w: int, h: int) -> tuple[list[float], list[float]]:
+    """Approximate eye boxes in normalized image coords [bx,by,bw,bh] using outer/inner eye corners and eyelids."""
+    le_idx = [33, 133, 160, 158, 153, 144]
+    re_idx = [362, 263, 387, 385, 380, 373]
+    def _box(idx):
+        pts = np.array([landmarks[i] for i in idx], dtype=np.float32)
+        xs = pts[:,0] / float(w)
+        ys = pts[:,1] / float(h)
+        minx, maxx = max(0.0, float(xs.min())), min(1.0, float(xs.max()))
+        miny, maxy = max(0.0, float(ys.min())), min(1.0, float(ys.max()))
+        return [minx, miny, max(1e-6, maxx-minx), max(1e-6, maxy-miny)]
+    return _box(le_idx), _box(re_idx)
+
+
+def lizard_direction_from_iris(landmarks: np.ndarray, w: int, h: int, yaw_pitch_dir: str | None = None,
+                               focus_th: float = 0.3) -> tuple[str, dict]:
+    """Estimate eye-gaze direction via iris centers relative to eye boxes.
+    Returns (direction, debug) where direction in {Left,Right,Up,Down,Focused,Unknown}.
+    focus_th: abs offset under which we consider Focused.
+    """
+    li, ri = iris_centers(landmarks)
+    if li is None or ri is None:
+        return (yaw_pitch_dir or "Unknown", {"method": "fallback"})
+    le_box, re_box = eye_boxes(landmarks, w, h)
+    def _norm(c, b):
+        bx, by, bw, bh = b
+        xn, yn = c[0]/float(w), c[1]/float(h)
+        return ((xn - bx) / bw, (yn - by) / bh)
+    lix, liy = _norm(li, le_box)
+    rix, riy = _norm(ri, re_box)
+    # center offsets [-0.5,0.5] within box aligned space
+    dx = ((lix - 0.5) + (rix - 0.5)) * 0.5
+    dy = ((liy - 0.5) + (riy - 0.5)) * 0.5
+    adx, ady = abs(dx), abs(dy)
+    if adx < focus_th and ady < focus_th:
+        dir = "Focused"
+    elif adx >= ady:
+        dir = "Right" if dx > 0 else "Left"
+    else:
+        dir = "Down" if dy > 0 else "Up"
+    dbg = {"li": [lix, liy], "ri": [rix, riy], "dx": dx, "dy": dy}
+    return dir, dbg
+
+
 def extract_landmarks(mp_results, image_width: int, image_height: int) -> np.ndarray | None:
     """Return Nx2 array of pixel coords for the first face landmarks, or None."""
     if not getattr(mp_results, 'multi_face_landmarks', None):
