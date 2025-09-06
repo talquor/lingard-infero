@@ -102,6 +102,13 @@ class DistractionConfig(BaseModel):
     owl_long_s: float | None = None
 
 
+class TrackerConfig(BaseModel):
+    iou_th: float | None = None
+    center_th: float | None = None
+    max_miss: int | None = None
+    match_by_center: bool | None = None
+
+
 def get_dms_config_dict():
     return {
         "use_dynamic_threshold": drowsy.use_dynamic_threshold,
@@ -126,6 +133,16 @@ def get_distraction_config_dict():
         "owl_yaw_th_deg": distraction.owl_yaw_th_deg,
         "owl_short_min_s": distraction.owl_short_min_s,
         "owl_long_s": distraction.owl_long_s,
+    }
+
+
+def get_tracker_config_dict():
+    t = S.tracker
+    return {
+        "iou_th": t.iou_th,
+        "center_th": t.center_th,
+        "max_miss": t.max_miss,
+        "match_by_center": t.match_by_center,
     }
 
 # ---------- Routes ----------
@@ -170,6 +187,18 @@ async def patch_distraction_config(cfg: DistractionConfig):
             if hasattr(distraction, k):
                 setattr(distraction, k, v)
     return {"ok": True, "config": get_distraction_config_dict()}
+
+
+@app.get("/config/tracker")
+def get_tracker_config():
+    return {"ok": True, "config": get_tracker_config_dict()}
+
+
+@app.patch("/config/tracker")
+async def patch_tracker_config(cfg: TrackerConfig):
+    with cfg_lock:
+        S.tracker.configure(**cfg.dict(exclude_none=True))
+    return {"ok": True, "config": get_tracker_config_dict()}
 
 @app.get("/", response_class=HTMLResponse)
 def home():
