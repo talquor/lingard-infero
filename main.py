@@ -130,11 +130,12 @@ small {{ color:#9fb0c3; }}
     <div class="kpi"><h3>PERCLOS</h3><div class="big">{k.get('dms_perclos_pct','-')}%</div><div class="sub">eye-closure</div></div>
     <div class="kpi"><h3>Blinks</h3><div class="big">{k.get('dms_blinks_per_min','-')}/min</div><div class="sub">rate</div></div>
     <div class="kpi"><h3>Microsleep</h3><div class="big">{('Yes' if k.get('dms_microsleep') else 'No') if k else '-'}</div><div class="sub">>1s eye closure</div></div>
+    <div class="kpi"><h3>Sleep</h3><div class="big">{('Yes' if k.get('dms_sleep_active') else 'No') if k else '-'}</div><div class="sub">dwell {k.get('dms_sleep_dwell_s','-')} s</div></div>
     <div class="kpi"><h3>Yawn</h3><div class="big">{('Yes' if k.get('dms_yawning') else 'No') if k else '-'}</div><div class="sub">sustained mouth open</div></div>
     <div class="kpi"><h3>Gaze</h3><div class="big">{k.get('dms_gaze_zone','-')}</div><div class="sub">on-road {k.get('dms_gaze_on_road_pct','-')}%</div></div>
     <div class="kpi"><h3>Head Yaw</h3><div class="big">{k.get('dms_head_yaw_deg','-')}°</div><div class="sub">pitch {k.get('dms_head_pitch_deg','-')}°</div></div>
     <div class="kpi"><h3>Eyes Off-Road</h3><div class="big">{k.get('dms_eyes_off_road_pct','-')}%</div><div class="sub">events {k.get('dms_eyes_off_road_events_per_min','-')}/min</div></div>
-    <div class="kpi"><h3>Blink Stats</h3><div class="big">{k.get('dms_avg_blink_dur_ms','-')} ms</div><div class="sub">last {k.get('dms_time_since_last_blink_s','-')} s</div></div>
+    <div class="kpi"><h3>Blink Stats</h3><div class="big">{k.get('dms_avg_blink_dur_ms','-')} ms</div><div class="sub">last {k.get('dms_time_since_last_blink_s','-')} s, fps {k.get('dms_fps_est','-')}</div></div>
     <div class="kpi"><h3>Eyes (EAR)</h3><div class="big">L {k.get('dms_left_ear','-')} | R {k.get('dms_right_ear','-')}</div><div class="sub">closed L:{k.get('dms_left_eye_closed','-')} R:{k.get('dms_right_eye_closed','-')}</div></div>
     <div class="kpi"><h3>Look Dir</h3><div class="big">{k.get('dms_look_direction','-')}</div><div class="sub">yaw {k.get('dms_head_yaw_deg','-')}°, pitch {k.get('dms_head_pitch_deg','-')}°</div></div>
   </div>
@@ -239,9 +240,14 @@ async def infer(request: Request):
             "dms_avg_blink_dur_ms": drowsy_out["avg_blink_dur_ms"],
             "dms_time_since_last_blink_s": drowsy_out["time_since_last_blink_s"],
             "dms_microsleep": drowsy_out["microsleep"],
+            "dms_microsleep_dwell_s": drowsy_out.get("microsleep_dwell_s"),
+            "dms_sleep_active": drowsy_out.get("sleep_event_active"),
+            "dms_sleep_dwell_s": drowsy_out.get("sleep_dwell_s"),
             "dms_drowsiness_score": drowsy_out["drowsiness_score"],
             "dms_fps_est": drowsy_out.get("fps_est"),
             "dms_ear_thresh_closed": drowsy_out.get("ear_thresh_closed"),
+            "dms_ear_thresh_open": drowsy_out.get("ear_thresh_open"),
+            "dms_perclos_window_s": drowsy_out.get("perclos_window_s"),
             "dms_yawning": yawn_out["yawning"],
             "dms_yawns_per_min": yawn_out["yawns_per_min"],
             # Distraction

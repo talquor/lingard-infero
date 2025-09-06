@@ -21,12 +21,14 @@ class DrowsinessEstimator:
         self,
         ear_thresh_closed: float = 0.21,
         microsleep_ms: int = 1000,
-        blink_min_s: float = 0.05,
-        blink_max_s: float = 0.7,
+        blink_min_s: float = 0.03,
+        blink_max_s: float = 0.8,
         use_dynamic_threshold: bool = True,
-        dynamic_rel_close: float = 0.75,
-        dynamic_rel_open: float = 0.85,
+        dynamic_rel_close: float = 0.85,
+        dynamic_rel_open: float = 0.93,
         absolute_min_close: float = 0.15,
+        perclos_window_s: float = 30.0,
+        sleep_min_s: float = 3.0,
     ):
         self.state = DrowsinessState()
         self.ear_thresh_closed = ear_thresh_closed
@@ -37,6 +39,8 @@ class DrowsinessEstimator:
         self.dynamic_rel_close = dynamic_rel_close
         self.dynamic_rel_open = dynamic_rel_open
         self.absolute_min_close = absolute_min_close
+        self.perclos_window_s = perclos_window_s
+        self.sleep_min_s = sleep_min_s
 
     def update(self, ts: float, landmarks: np.ndarray | None) -> Dict[str, float | bool]:
         # Compute EAR if landmarks are available; if not, skip updates that infer closure
@@ -92,14 +96,22 @@ class DrowsinessEstimator:
                     blink_detected = True
                     st.blinks.append((ts, duration))
 
-        # Microsleep if eyes closed continuously beyond threshold
+        # Microsleep and sleep-event if eyes closed continuously beyond thresholds
         microsleep = False
+        microsleep_dwell_s = 0.0
+        sleep_event_active = False
+        sleep_dwell_s = 0.0
         if st.eye_closed_since is not None and ear is not None:
-            if (ts - st.eye_closed_since) * 1000.0 >= self.microsleep_ms:
+            dwell = ts - st.eye_closed_since
+            microsleep_dwell_s = round(dwell, 2)
+            if dwell * 1000.0 >= self.microsleep_ms:
                 microsleep = True
+            if dwell >= self.sleep_min_s:
+                sleep_event_active = True
+                sleep_dwell_s = round(dwell, 2)
 
-        # Compute PERCLOS over 60s window as percent of time eyes closed
-        window_s = 60.0
+        # Compute PERCLOS over configured window as percent of time eyes closed
+        window_s = self.perclos_window_s
         now = ts
         while st.ear_hist and now - st.ear_hist[0][0] > window_s:
             st.ear_hist.popleft()
@@ -112,7 +124,7 @@ class DrowsinessEstimator:
                 ts_prev, ear_prev = st.ear_hist[i-1]
                 ts_curr, _ = st.ear_hist[i]
                 dt = ts_curr - ts_prev
-                if ear_prev < self.ear_thresh_closed:
+                if ear_prev < th_close:
                     closed_dur += dt
             if total_dur > 0:
                 perclos = (closed_dur / total_dur) * 100.0
@@ -154,8 +166,12 @@ class DrowsinessEstimator:
             "avg_blink_dur_ms": avg_blink_dur_ms,
             "time_since_last_blink_s": time_since_last_blink_s,
             "microsleep": microsleep,
+            "microsleep_dwell_s": microsleep_dwell_s,
+            "sleep_event_active": sleep_event_active,
+            "sleep_dwell_s": sleep_dwell_s,
             "drowsiness_score": round(score, 1),
             "fps_est": fps_est,
             "ear_thresh_closed": round(th_close, 3),
             "ear_thresh_open": round(th_open, 3),
+            "perclos_window_s": window_s,
         }
